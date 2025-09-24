@@ -21,14 +21,17 @@ ALLOWED_MIME: Final[set[str]] = {
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
+
 def _safe_filename(name: str) -> str:
     stem = Path(name).name
-    return _SAFE_RE.sub("_", stem) or "trades.csv"
+    return _SAFE_RE.sub("_", stem) or "file.csv"
+
 
 def _looks_like_csv(file_name: str | None, mime: str | None) -> bool:
     fn_ok = (file_name or "").lower().endswith(".csv")
     mime_ok = (mime or "") in ALLOWED_MIME
     return fn_ok or mime_ok
+
 
 @imp_rt.message(Imp.file)
 async def cmd_file(msg: Message, bot: Bot):
@@ -38,7 +41,7 @@ async def cmd_file(msg: Message, bot: Bot):
 
     doc = msg.document
     if not _looks_like_csv(doc.file_name, doc.mime_type):
-        await msg.reply("⚠️ Пришлите именно **CSV** файл (экспорт бэктеста).")
+        await msg.reply("⚠️ Пришли саме **CSV** файл (експорт бэктесту).")
         return
 
     tmpdir = Path(tempfile.mkdtemp(prefix="csv_import_"))
@@ -46,26 +49,24 @@ async def cmd_file(msg: Message, bot: Bot):
 
     try:
         await bot.download(doc, destination=dst_path)
-        notify = await msg.reply("📥 Файл получен. Начинаю импорт в Notion…")
+        notify = await msg.reply("📥 Файл отримано. Починаю імпорт у Notion…")
 
         result = await import_trades_from_csv(
             user_id=msg.from_user.id,
             file_path=str(dst_path),
         )
 
-        if result.get("ok"):
+        if isinstance(result, dict) and result.get("ok"):
             imported = result.get("imported", 0)
             skipped = result.get("skipped", 0)
-            extra = result.get("extra_log")
-            text = f"✅ Готово! Добавлено: **{imported}**, пропущено: **{skipped}**."
-            if extra:
-                text += f"\n\n{extra}"
-            await notify.edit_text(text)
+            # никаких длинных логов в Telegram — всё в консоль
+            await notify.edit_text(f"✅ Готово! Додано: **{imported}**, пропущено: **{skipped}**.\nℹ️ Детальні логи — в консолі.")
         else:
-            await notify.edit_text(f"❌ Ошибка импорта: `{result.get('error')}`")
+            err = (result or {}).get("error", "невідома помилка")
+            await notify.edit_text(f"❌ Помилка імпорту: {err}")
 
     except Exception as e:
-        await msg.answer(f"💥 Не удалось обработать файл: `{e}`")
+        await msg.answer(f"💥 Не вдалося обробити файл: `{e}`")
     finally:
         try:
             shutil.rmtree(tmpdir, ignore_errors=True)

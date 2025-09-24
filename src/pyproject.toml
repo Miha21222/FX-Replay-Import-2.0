@@ -1,0 +1,15 @@
+[project]
+name = "FX_Replay_Bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.22.0",
+    "aiosqlite>=0.21.0",
+    "asyncpg>=0.30.0",
+    "notion-client>=2.5.0",
+    "pandas>=2.3.2",
+    "python-dotenv>=1.1.1",
+    "sqlalchemy>=2.0.43",
+]

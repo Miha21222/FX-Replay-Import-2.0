@@ -41,7 +41,7 @@ async def cmd_file(msg: Message, bot: Bot):
 
     doc = msg.document
     if not _looks_like_csv(doc.file_name, doc.mime_type):
-        await msg.reply("⚠️ Пришли саме **CSV** файл (експорт бэктесту).")
+        await msg.reply("⚠️ Пришлите файл с расширением .csv!")
         return
 
     tmpdir = Path(tempfile.mkdtemp(prefix="csv_import_"))
@@ -49,7 +49,7 @@ async def cmd_file(msg: Message, bot: Bot):
 
     try:
         await bot.download(doc, destination=dst_path)
-        notify = await msg.reply("📥 Файл отримано. Починаю імпорт у Notion…")
+        notify = await msg.reply("📥 Файл получен! Начинаю импорт в Notion...")
 
         result = await import_trades_from_csv(
             user_id=msg.from_user.id,
@@ -60,13 +60,13 @@ async def cmd_file(msg: Message, bot: Bot):
             imported = result.get("imported", 0)
             skipped = result.get("skipped", 0)
             # никаких длинных логов в Telegram — всё в консоль
-            await notify.edit_text(f"✅ Готово! Додано: **{imported}**, пропущено: **{skipped}**.\nℹ️ Детальні логи — в консолі.")
+            await notify.edit_text(f"📦 Импорт завершён!\n✅ Добавлено: {imported}\n🚫 Пропущено: {skipped}")
         else:
-            err = (result or {}).get("error", "невідома помилка")
-            await notify.edit_text(f"❌ Помилка імпорту: {err}")
+            err = (result or {}).get("error", "Неизвестная ошибка")
+            await notify.edit_text(f"❌ Ошибка: {err}")
 
     except Exception as e:
-        await msg.answer(f"💥 Не вдалося обробити файл: `{e}`")
+        await msg.answer(f"💥 Не удалось обработать файл: `{e}`")
     finally:
         try:
             shutil.rmtree(tmpdir, ignore_errors=True)

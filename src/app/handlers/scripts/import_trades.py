@@ -48,7 +48,6 @@ _SETUP_CODE_OVERRIDES = {
     "30m OF": "30F",
 }
 
-
 # ----------------------------- helpers -----------------------------
 
 def _page_id_from_url(url: str) -> str:
@@ -293,6 +292,48 @@ def _auto_detect_day_session_props(
     logger.info(f"day/session detected: day={day_key} session={session_key}")
     return day_key, session_key, rel_maps
 
+# ----------------------------- expectation / direction anchor helpers -----------------------------
+
+def _find_expectation_anchor_prop(db_props: Dict[str, Any]) -> Optional[str]:
+    """Ищем колонку-анкёр для матожидания (relation)."""
+    info = db_props.get("🧮 Матожидание")
+    if info and info.get("type") == "relation":
+        return "🧮 Матожидание"
+    for name, meta in db_props.items():
+        if meta.get("type") != "relation":
+            continue
+        n = name.casefold()
+        if "матож" in n or "ожидан" in n or "expect" in n:
+            return name
+    return None
+
+
+def _find_direction_anchor_prop(db_props: Dict[str, Any]) -> Optional[str]:
+    """Ищем колонку-анкёр для Direction (relation)."""
+    # точные и распространённые варианты
+    for probe in ("Direction", "Directions", "Направление"):
+        info = db_props.get(probe)
+        if info and info.get("type") == "relation":
+            return probe
+    # эвристика по названию
+    for name, meta in db_props.items():
+        if meta.get("type") != "relation":
+            continue
+        n = name.casefold()
+        if "direction" in n or "направл" in n:
+            return name
+    return None
+
+
+def _pick_single_page_id(notion: Client, db_id: Optional[str]) -> Optional[str]:
+    if not db_id:
+        return None
+    try:
+        resp = notion.databases.query(database_id=db_id, page_size=1)
+        items = resp.get("results") or []
+        return items[0]["id"] if items else None
+    except Exception:
+        return None
 
 # ----------------------------- risk -----------------------------
 
@@ -331,11 +372,9 @@ def _risk_bucket(risk_pct: float) -> str:
         return "1.5%"
     return "2.0%"
 
-
 # ----------------------------- Entry / SL index -----------------------------
 
 def _cyr2lat_lookalikes(s: str) -> str:
-    # минимальная карта для частых опечаток (кириллица -> латиница)
     table = str.maketrans({
         "О": "O", "о": "o",
         "Т": "T", "т": "t",
@@ -356,20 +395,16 @@ def _normalize_detail(s: str) -> str:
     x = (s or "").strip()
     x = _cyr2lat_lookalikes(x)
 
-    # СНАЧАЛА — короткие TF без пробелов
     if re.fullmatch(r"(?i)15m", x):
         x = "TF 15m"
     elif re.fullmatch(r"(?i)30m", x):
         x = "TF 30m"
 
-    # дальше — остальная нормализация
     x = x.replace("_", " ")
     x = re.sub(r"([A-Za-z])(\d)", r"\1 \2", x)
     x = re.sub(r"(\d)([A-Za-z])", r"\1 \2", x)
     x = re.sub(r"([a-z])([A-Z])", r"\1 \2", x)
-    # десятичная запятая -> точка
     x = re.sub(r"(?<=\d),(?=\d)", ".", x)
-    # Ful Fill -> Fulfill, Fix 2 RR -> Fix2RR
     x = re.sub(r"\bFul\s*Fill\b", "Fulfill", x, flags=re.I)
     x = re.sub(r"\bTP\s*Fix\s*2\s*RR\b", "TP Fix2RR", x, flags=re.I)
 
@@ -507,10 +542,8 @@ def _index_detail_db_by_setup(
 def _make_entry_sl_index(
         notion: Client, db_props: Dict[str, Any]
 ):
-    # карта "lower -> real"
     lower_to_real = {k.lower(): k for k in db_props.keys()}
 
-    # 1) приоритетно — явные имена из твоей базы
     preferred_entry_names = ["entry details", "entry", "entry detail"]
     preferred_sl_names = ["mistakes", "sl", "stop loss"]
 
@@ -519,7 +552,6 @@ def _make_entry_sl_index(
     sl_prop = next((db_props[n] and n for n in (lower_to_real.get(x) for x in preferred_sl_names) if
                     n and db_props[n].get("type") == "relation"), None)
 
-    # 2) если всё ещё None — эвристика: перебираем все relation и смотрим название целевой БД
     def _guess(prop_name: str) -> str:
         info = db_props[prop_name]
         rid = info["relation"]["database_id"]
@@ -540,7 +572,6 @@ def _make_entry_sl_index(
 
     entry_index, sl_index = {}, {}
 
-    # индексы
     def _build_index(detail_prop_name: str, label: str):
         setup_rel = _detect_setup_prop_name(notion, db_props[detail_prop_name]["relation"]["database_id"], label=label)
         if not setup_rel:
@@ -558,7 +589,6 @@ def _make_entry_sl_index(
     else:
         logger.warning("SL property not usable: name=None type=None")
 
-    # множества сетапов по каждой детали (для сообщений о рассинхроне)
     from collections import defaultdict
     entry_detail_setups = defaultdict(set)
     for (scode, detail) in entry_index.keys():
@@ -576,7 +606,6 @@ def _parse_tags(raw: str) -> List[Tuple[str, str, str]]:
     if not raw:
         return out
 
-    # защитим десятичную запятую внутри одного тега, чтобы split(',') не резал
     safe = re.sub(r"(?<=_[0-9]),(?=[0-9]\b)", ".", raw)
 
     parts = [t for t in safe.split(",") if t.strip()]
@@ -606,23 +635,15 @@ def _pick_csv_encoding(file_path: str) -> str:
             return enc
         except UnicodeDecodeError:
             continue
-    # если вообще ничего — пусть упадёт стандартной ошибкой
     with open(file_path, "r", encoding="utf-8") as f:
         f.read(1)
     return "utf-8"
-
 
 # ----------------------------- Setup mapping for journal -----------------------------
 
 def _load_setup_code_maps_from_journal(
     notion: Client, db_props: Dict[str, Any]
 ) -> Tuple[Dict[str, str], Dict[str, str], Optional[str]]:
-    """
-    Читает свойство 'Setup' самой журнальной БД и строит:
-      - code_to_id:   {'30F': '<page_id>', ...}  (для relation)
-      - code_to_name: {'30F': '30m OF', ...}     (имя для select/логов)
-    Возвращает также тип свойства ('relation' | 'select' | None).
-    """
     if "Setup" not in db_props:
         return {}, {}, None
 
@@ -637,14 +658,13 @@ def _load_setup_code_maps_from_journal(
         while True:
             resp = notion.databases.query(database_id=setup_db_id, start_cursor=cursor)
             for p in resp.get("results", []):
-                # вытаскиваем имя сетапа (title)
                 title = ""
                 for k, v in p.get("properties", {}).items():
                     if v.get("type") == "title" and v["title"]:
                         title = v["title"][0]["plain_text"].strip()
                         break
                 if title:
-                    code = _derive_setup_code(title)  # напр. '30m OF' -> '30F'
+                    code = _derive_setup_code(title)
                     code_to_id[code] = p["id"]
                     code_to_name[code] = title
             if not resp.get("has_more"):
@@ -655,19 +675,17 @@ def _load_setup_code_maps_from_journal(
         return code_to_id, code_to_name, "relation"
 
     if prop_type == "select":
-        # для select у нас только список опций
         opts = info.get("select", {}).get("options", []) or []
         for o in opts:
             name = o.get("name") or ""
             if not name:
                 continue
             code = _derive_setup_code(name)
-            code_to_name[code] = name  # id не нужен для select
+            code_to_name[code] = name
         logger.info(f"Setup select options (journal): codes={list(code_to_name.keys())}")
         return {}, code_to_name, "select"
 
     return {}, {}, None
-
 
 # ----------------------------- import -----------------------------
 
@@ -723,6 +741,33 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
             entry_detail_setups,
             sl_detail_setups,
         ) = _make_entry_sl_index(notion, db_props)
+
+        # === NEW: автоякоря "🧮 Матожидание" и "Direction" ===
+        expect_prop_key = _find_expectation_anchor_prop(db_props)
+        expect_anchor_id: Optional[str] = None
+        if expect_prop_key:
+            try:
+                expect_db_id = db_props[expect_prop_key]["relation"]["database_id"]
+                expect_anchor_id = _pick_single_page_id(notion, expect_db_id)
+                logger.info(
+                    f"expectation anchor: prop='{expect_prop_key}', db={expect_db_id[:6]}…, "
+                    f"anchor_page={expect_anchor_id[:6]+'…' if expect_anchor_id else None}"
+                )
+            except Exception as e:
+                logger.warning(f"expectation anchor resolve failed: {e!r}")
+
+        direction_prop_key = _find_direction_anchor_prop(db_props)
+        direction_anchor_id: Optional[str] = None
+        if direction_prop_key:
+            try:
+                direction_db_id = db_props[direction_prop_key]["relation"]["database_id"]
+                direction_anchor_id = _pick_single_page_id(notion, direction_db_id)
+                logger.info(
+                    f"direction anchor: prop='{direction_prop_key}', db={direction_db_id[:6]}…, "
+                    f"anchor_page={direction_anchor_id[:6]+'…' if direction_anchor_id else None}"
+                )
+            except Exception as e:
+                logger.warning(f"direction anchor resolve failed: {e!r}")
 
         # detect CSV encoding once
         enc = _pick_csv_encoding(file_path)
@@ -875,11 +920,17 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                             else:
                                 logger.debug(f"row#{i}: Risk bucket '{bucket}' not found in risk_map")
 
+                    # === NEW: автоякоря на создаваемую страницу ===
+                    if expect_prop_key and expect_anchor_id:
+                        props[expect_prop_key] = {"relation": [{"id": expect_anchor_id}]}
+                    if direction_prop_key and direction_anchor_id:
+                        props[direction_prop_key] = {"relation": [{"id": direction_anchor_id}]}
+
                     # Tags → Entry / SL
                     tags_raw = (trade.get(tags_field) if tags_field else trade.get("tags")) or ""
                     parsed_tags = _parse_tags(tags_raw)
 
-                    # --- NEW: Setup property from tags (e.g., 30F -> 30m OF) ---
+                    # Setup (из тегов)
                     setup_codes = sorted({sc for (sc, _kind, _detail) in parsed_tags})
                     primary_setup = setup_codes[0] if setup_codes else None
                     if len(setup_codes) > 1:
@@ -917,7 +968,6 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                                 entry_rel_ids.append(pid)
                                 logger.debug(f"row#{i}: ENTRY hit ({setup_code}, {detail_norm}) -> {pid[:6]}…")
                             else:
-                                # если такая деталь существует под другими сетапами — зафиксируем рассинхрон
                                 setups = entry_detail_setups.get(detail_norm)
                                 if setups:
                                     logger.warning(
@@ -954,7 +1004,6 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                     skipped += 1
                     logger.exception(f"row#{i}: ERROR {e!r}")
 
-        # финальная сводка
         logger.info(f"entry_index size={len(entry_index)}; sl_index size={len(sl_index)}")
 
         return {"ok": True, "imported": imported, "skipped": skipped}

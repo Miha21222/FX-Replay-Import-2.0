@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Final
 
 from aiogram import Router, Bot
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+import src.app.handlers.keyboards as kb
 from src.app.handlers.scripts.import_trades import import_trades_from_csv
-from src.app.handlers.utils.states import Imp
+from src.app.handlers.utils.states import Imp, Menu
 
 imp_rt = Router()
 
@@ -34,7 +36,7 @@ def _looks_like_csv(file_name: str | None, mime: str | None) -> bool:
 
 
 @imp_rt.message(Imp.file)
-async def cmd_file(msg: Message, bot: Bot):
+async def cmd_file(msg: Message, bot: Bot, state: FSMContext):
     if not msg.document:
         await msg.answer("⚠️ Пришлите файл со сделками!")
         return
@@ -61,6 +63,8 @@ async def cmd_file(msg: Message, bot: Bot):
             skipped = result.get("skipped", 0)
             # никаких длинных логов в Telegram — всё в консоль
             await notify.edit_text(f"📦 Импорт завершён!\n✅ Добавлено: {imported}\n🚫 Пропущено: {skipped}")
+            await state.set_state(Menu.menu)
+            await msg.answer('🔁 Возвращаю в меню', reply_markup=kb.menu)
         else:
             err = (result or {}).get("error", "Неизвестная ошибка")
             await notify.edit_text(f"❌ Ошибка: {err}")

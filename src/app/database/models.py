@@ -5,7 +5,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 psql_engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db_name", echo=True)
-sqlite_engine = create_async_engine("sqlite+aiosqlite:///./database.db", echo=True)
+# Для докера 🔽
+# sqlite_engine = create_async_engine("sqlite+aiosqlite:////src/users.db", echo=True)
+# Для локального запуска 🔽
+sqlite_engine = create_async_engine("sqlite+aiosqlite:///src/users.db", echo=True)
 
 async_sqlite_session = async_sessionmaker(sqlite_engine)
 async_psql_session = async_sessionmaker(psql_engine)

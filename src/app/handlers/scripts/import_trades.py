@@ -1,14 +1,13 @@
 # ruff: noqa
 import csv
-import re
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, DefaultDict
-from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from notion_client import Client
-from zoneinfo import ZoneInfo
 
 from src.app.database.requests import get_data  # твоя async-функция
 
@@ -47,6 +46,9 @@ _TAG_RE = re.compile(r"^\s*([A-Za-z0-9]+)_(E|SL)_(.+?)\s*$")
 _SETUP_CODE_OVERRIDES = {
     "30m OF": "30F",
 }
+
+DEFAULT_ICON_URL = "https://www.notion.so/icons/numero_gray.svg"
+
 
 # ----------------------------- helpers -----------------------------
 
@@ -292,6 +294,7 @@ def _auto_detect_day_session_props(
     logger.info(f"day/session detected: day={day_key} session={session_key}")
     return day_key, session_key, rel_maps
 
+
 # ----------------------------- expectation / direction anchor helpers -----------------------------
 
 def _find_expectation_anchor_prop(db_props: Dict[str, Any]) -> Optional[str]:
@@ -310,12 +313,10 @@ def _find_expectation_anchor_prop(db_props: Dict[str, Any]) -> Optional[str]:
 
 def _find_direction_anchor_prop(db_props: Dict[str, Any]) -> Optional[str]:
     """Ищем колонку-анкёр для Direction (relation)."""
-    # точные и распространённые варианты
     for probe in ("Direction", "Directions", "Направление"):
         info = db_props.get(probe)
         if info and info.get("type") == "relation":
             return probe
-    # эвристика по названию
     for name, meta in db_props.items():
         if meta.get("type") != "relation":
             continue
@@ -334,6 +335,7 @@ def _pick_single_page_id(notion: Client, db_id: Optional[str]) -> Optional[str]:
         return items[0]["id"] if items else None
     except Exception:
         return None
+
 
 # ----------------------------- risk -----------------------------
 
@@ -371,6 +373,7 @@ def _risk_bucket(risk_pct: float) -> str:
     if risk_pct <= 1.5:
         return "1.5%"
     return "2.0%"
+
 
 # ----------------------------- Entry / SL index -----------------------------
 
@@ -639,10 +642,139 @@ def _pick_csv_encoding(file_path: str) -> str:
         f.read(1)
     return "utf-8"
 
+
+# ----------------------------- Pair helpers (NEW) -----------------------------
+
+def _normalize_pair_name(raw: str) -> str:
+    """
+    Нормализация имени инструмента из CSV.
+
+    Делает:
+    - убирает префиксы (FX:, BINANCE:, OANDA:, FXCM:)
+    - убирает /, -, пробелы
+    - знает алиасы для индексов/металлов/крипты
+    - если у индексов присутствует валютный суффикс (…USD/…USDT) — корректно отбрасывает его
+    """
+    s = (raw or "").strip().upper()
+    if ":" in s:
+        s = s.split(":", 1)[1]  # FX:GBPUSD -> GBPUSD
+    s = s.replace("/", "").replace("-", "").replace(" ", "")
+
+    # Базовые алиасы (без валютных суффиксов)
+    alias_base = {
+        # Индексы
+        "SPX500": "US500", "SP500": "US500", "SNP500": "US500", "S&P500": "US500", "US500": "US500",
+        "NAS100": "US100", "US100": "US100", "NDX100": "US100",
+        "DJ30": "US30", "US30": "US30", "DJI": "US30",
+        "FTSE100": "UK100", "UK100": "UK100",
+        "DE40": "GER40", "DAX": "GER40", "GER40": "GER40",
+        "DAX30": "GER30", "DE30": "GER30", "GER30": "GER30",
+        "NIKKEI225": "JP225", "NI225": "JP225", "JP225": "JP225",
+
+        # Металлы
+        "GOLD": "XAUUSD", "XAU": "XAUUSD", "XAUUSD": "XAUUSD",
+        "SILVER": "XAGUSD", "XAG": "XAGUSD", "XAGUSD": "XAGUSD",
+
+        # Крипта (по умолчанию к USDT)
+        "BTC": "BTCUSDT", "BTCUSD": "BTCUSDT", "BTCUSDT": "BTCUSDT",
+        "ETH": "ETHUSDT", "ETHUSD": "ETHUSDT", "ETHUSDT": "ETHUSDT",
+    }
+
+    # Если точное попадание в базовые алиасы — вернём сразу
+    if s in alias_base:
+        return alias_base[s]
+
+    # Индекс + валютный суффикс (SPX500USD, US500USD, GER40USD, US100USD и т.п.)
+    for suff in ("USD", "USDT"):
+        if s.endswith(suff):
+            base = s[: -len(suff)]
+            if base in alias_base:
+                return alias_base[base]
+            # если это уже «нормализованная» форма индекса — оставляем базу
+            if base in ("US500", "US100", "US30", "UK100", "GER40", "GER30", "JP225"):
+                return base
+            # металлы уже описаны отдельно, а форекс-пары оставим ниже
+            break
+
+    # Классические форекс-пары вида EURUSD, GBPUSD, USDJPY и т.п. — оставляем как есть
+    if len(s) in (6, 7) and any(
+            s.endswith(x) for x in ("USD", "USDT", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")):
+        return s
+
+    # XAU/XAG без суффикса
+    if s == "XAU":
+        return "XAUUSD"
+    if s == "XAG":
+        return "XAGUSD"
+
+    # Крипта без суффикса — считаем к USDT
+    if s in ("BTC", "ETH"):
+        return s + "USDT"
+
+    return s
+
+
+def _find_pair_prop_name(notion: Client, db_props: Dict[str, Any]) -> Optional[str]:
+    """Ищем property пары (relation/select), допускаем русские/вариации."""
+    lower_to_real = {k.casefold(): k for k in db_props.keys()}
+    probes = ["pair", "пара", "symbol", "инструмент"]
+    for p in probes:
+        name = lower_to_real.get(p)
+        if name and db_props[name].get("type") in ("relation", "select"):
+            return name
+
+    # эвристика: relation, чья связанная БД по названию похожа на «Пары/Pairs/Symbols»
+    for name, info in db_props.items():
+        if info.get("type") == "relation":
+            try:
+                rid = info["relation"]["database_id"]
+                meta = notion.databases.retrieve(rid)
+                title = meta.get("title", [])
+                t = "".join(x.get("plain_text", "") for x in title).lower()
+                if any(x in t for x in ("pair", "пары", "symbols", "инструменты")):
+                    return name
+            except Exception:
+                pass
+
+    if "Pair" in db_props and db_props["Pair"].get("type") in ("relation", "select"):
+        return "Pair"
+    return None
+
+
+def _build_normalized_pair_map(
+        notion: Client, db_props: Dict[str, Any], pair_prop_name: str
+) -> Tuple[Optional[str], Dict[str, str]]:
+    """
+    Возвращает (pair_prop_type, norm_map), где norm_map: normalized_name -> page_id.
+    Работает если колонка пары — relation. Если select — карта пустая (fallback).
+    """
+    info = db_props[pair_prop_name]
+    ptype = info.get("type")
+    if ptype != "relation":
+        return ptype, {}
+
+    related_db_id = info["relation"]["database_id"]
+    raw_map = _load_relation_map(notion, related_db_id, label="pair_map")
+
+    norm_map: Dict[str, str] = {}
+    for display_name, page_id in raw_map.items():
+        # исходное имя из БД
+        norm = _normalize_pair_name(display_name)
+        norm_map[norm] = page_id
+
+        # альтернатива: убираем разделители и снова нормализуем
+        alt = display_name.replace("/", "").replace("-", "").replace(" ", "").upper()
+        alt_norm = _normalize_pair_name(alt)
+        norm_map[alt_norm] = page_id
+
+    logger.info(f"pair_map: loaded={len(raw_map)}; normalized_keys={len(norm_map)}")
+    return ptype, norm_map
+
+
 # ----------------------------- Setup mapping for journal -----------------------------
 
 def _load_setup_code_maps_from_journal(
-    notion: Client, db_props: Dict[str, Any]
+        notion: Client, db_props: Dict[str, Any]
 ) -> Tuple[Dict[str, str], Dict[str, str], Optional[str]]:
     if "Setup" not in db_props:
         return {}, {}, None
@@ -687,6 +819,7 @@ def _load_setup_code_maps_from_journal(
 
     return {}, {}, None
 
+
 # ----------------------------- import -----------------------------
 
 @dataclass
@@ -718,16 +851,15 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
         # Карты для свойства Setup самой журнальной БД
         setup_code_to_id, setup_code_to_name, setup_prop_type = _load_setup_code_maps_from_journal(notion, db_props)
 
-        # Pair map (если relation)
-        pair_prop_type = db_props.get("Pair", {}).get("type")
-        pair_map: Dict[str, str] = {}
-        if pair_prop_type == "relation":
+        # -------- PAIR: автоопределение property и нормализованный matcher (NEW) --------
+        pair_prop_name: Optional[str] = _find_pair_prop_name(notion, db_props)
+        pair_prop_type: Optional[str] = None
+        pair_map_norm: Dict[str, str] = {}
+        if pair_prop_name:
             try:
-                pair_map = _load_relation_map(
-                    notion, db_props["Pair"]["relation"]["database_id"], label="pair_map"
-                )
+                pair_prop_type, pair_map_norm = _build_normalized_pair_map(notion, db_props, pair_prop_name)
             except Exception as e:
-                logger.exception(f"pair_map error: {e}")
+                logger.exception(f"pair_map build error: {e}")
 
         # Day / Session
         day_prop_key, session_prop_key, rel_maps = _auto_detect_day_session_props(notion, db_props)
@@ -751,7 +883,7 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                 expect_anchor_id = _pick_single_page_id(notion, expect_db_id)
                 logger.info(
                     f"expectation anchor: prop='{expect_prop_key}', db={expect_db_id[:6]}…, "
-                    f"anchor_page={expect_anchor_id[:6]+'…' if expect_anchor_id else None}"
+                    f"anchor_page={expect_anchor_id[:6] + '…' if expect_anchor_id else None}"
                 )
             except Exception as e:
                 logger.warning(f"expectation anchor resolve failed: {e!r}")
@@ -764,7 +896,7 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                 direction_anchor_id = _pick_single_page_id(notion, direction_db_id)
                 logger.info(
                     f"direction anchor: prop='{direction_prop_key}', db={direction_db_id[:6]}…, "
-                    f"anchor_page={direction_anchor_id[:6]+'…' if direction_anchor_id else None}"
+                    f"anchor_page={direction_anchor_id[:6] + '…' if direction_anchor_id else None}"
                 )
             except Exception as e:
                 logger.warning(f"direction anchor resolve failed: {e!r}")
@@ -824,7 +956,9 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                     day_name = RU_WEEKDAY[local_dt.weekday()]
                     session_name = _detect_session(local_dt.hour)
 
-                    pair_name = _strip_pair_name(trade.get("pair") or "")
+                    # ----- Pair: нормализация и матчинг (NEW) -----
+                    pair_raw = _strip_pair_name(trade.get("pair") or "")
+                    pair_norm = _normalize_pair_name(pair_raw)
 
                     side_raw = (trade.get("side") or "").strip().lower()
                     if side_raw == "buy":
@@ -856,15 +990,23 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                         elif t == "title":
                             props["ID"] = {"title": [{"text": {"content": str(trade_id_raw)}}]}
 
-                    if "Pair" in db_props:
-                        if pair_prop_type == "select" and pair_name:
-                            props["Pair"] = {"select": {"name": pair_name}}
-                        elif pair_prop_type == "relation" and pair_name:
-                            pid = pair_map.get(pair_name)
+                    # ----- Pair relation/select with normalized matching (NEW) -----
+                    if pair_prop_name:
+                        if pair_prop_type == "relation":
+                            pid = pair_map_norm.get(pair_norm)
+                            if not pid:
+                                # попробовать агрессивно очищенный вариант
+                                fallback = _normalize_pair_name(
+                                    pair_raw.upper().replace("/", "").replace("-", "").replace(" ", "")
+                                )
+                                pid = pair_map_norm.get(fallback)
                             if pid:
-                                props["Pair"] = {"relation": [{"id": pid}]}
+                                props[pair_prop_name] = {"relation": [{"id": pid}]}
                             else:
-                                logger.debug(f"row#{i}: Pair '{pair_name}' not in pair_map")
+                                logger.warning(f"row#{i}: Pair not matched -> csv={pair_raw!r} norm={pair_norm!r}")
+                        elif pair_prop_type == "select":
+                            sel_name = pair_raw.strip() or pair_norm
+                            props[pair_prop_name] = {"select": {"name": sel_name}}
 
                     if "Date" in db_props:
                         props["Date"] = {"date": {"start": local_dt.isoformat()}}
@@ -934,7 +1076,8 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                     setup_codes = sorted({sc for (sc, _kind, _detail) in parsed_tags})
                     primary_setup = setup_codes[0] if setup_codes else None
                     if len(setup_codes) > 1:
-                        logger.warning(f"row#{i}: multiple setup codes in tags -> {setup_codes}; using primary={primary_setup}")
+                        logger.warning(
+                            f"row#{i}: multiple setup codes in tags -> {setup_codes}; using primary={primary_setup}")
 
                     if primary_setup and "Setup" in db_props:
                         if setup_prop_type == "relation":
@@ -946,7 +1089,8 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                             else:
                                 fallback_name = setup_code_to_name.get(primary_setup)
                                 if fallback_name:
-                                    logger.debug(f"row#{i}: Setup relation id not found for code={primary_setup}, title={fallback_name}")
+                                    logger.debug(
+                                        f"row#{i}: Setup relation id not found for code={primary_setup}, title={fallback_name}")
                                 else:
                                     logger.debug(f"row#{i}: Setup relation miss for code={primary_setup}")
                         elif setup_prop_type == "select":
@@ -961,8 +1105,8 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                     for setup_code, kind, detail_norm in parsed_tags:
                         if kind == "E" and entry_prop_key:
                             pid = (
-                                entry_index.get((setup_code, detail_norm))
-                                or entry_index.get(("GLOBAL", detail_norm))
+                                    entry_index.get((setup_code, detail_norm))
+                                    or entry_index.get(("GLOBAL", detail_norm))
                             )
                             if pid:
                                 entry_rel_ids.append(pid)
@@ -996,7 +1140,11 @@ async def import_trades_from_csv(user_id: int, file_path: str) -> Dict[str, Any]
                     if sl_prop_key and sl_rel_ids and db_props.get(sl_prop_key, {}).get("type") == "relation":
                         props[sl_prop_key] = {"relation": [{"id": pid} for pid in sorted(set(sl_rel_ids))]}
 
-                    notion.pages.create(parent={"database_id": journal_db_id}, properties=props)
+                    notion.pages.create(
+                        parent={"database_id": journal_db_id},
+                        properties=props,
+                        icon={"type": "external", "external": {"url": DEFAULT_ICON_URL}},
+                    )
                     imported += 1
                     logger.info(f"row#{i}: created page #{next_num - 1}")
 

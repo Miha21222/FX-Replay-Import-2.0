@@ -14,6 +14,13 @@ async def check_user(tg_id):
             return False
 
 
+async def get_all_users():
+    async with db.async_sqlite_session() as session:
+        result = await session.scalars(select(User.tg_id))
+        users = result.all()  # получаем список всех пользователей
+        return users
+
+
 async def register_user(tg_id, name, phone):
     async with db.async_sqlite_session() as session:
         session.add(User(tg_id=tg_id, name=name, phone_number=phone))

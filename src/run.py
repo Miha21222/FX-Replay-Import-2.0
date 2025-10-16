@@ -6,14 +6,15 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
-from aiogram.types import ReplyKeyboardRemove
 from dotenv import load_dotenv
 
+import src.app.database.requests as rq
+import src.app.handlers.keyboards as kb
 from src.app.database.models import init_sqlite_models
-from src.app.handlers.register import register_rt
 from src.app.handlers.imp import imp_rt
-from src.app.handlers.notion import ndata_rt
 from src.app.handlers.menu import menu_rt
+from src.app.handlers.notion import ndata_rt
+from src.app.handlers.register import register_rt
 from src.app.handlers.utils.states import Menu
 from src.app.middlewares.access_control import GroupAccessMiddleware
 
@@ -48,10 +49,24 @@ async def main():
 
 async def startup(dispatcher: Dispatcher):
     await init_sqlite_models()
+    load_dotenv()
+    token = os.getenv('BOT_TOKEN')
+    bot = Bot(token)
+    users = await rq.get_all_users()
+    text = '✅ Бот запущен!'
+    for user in users:
+        await bot.send_message(chat_id=user, text=text)
     logging.info("Starting up...")
 
 
 async def shutdown(dispatcher: Dispatcher):
+    users = await rq.get_all_users()
+    load_dotenv()
+    token = os.getenv('BOT_TOKEN')
+    bot = Bot(token)
+    text = '🚫 Бот приостановлен!'
+    for user in users:
+        await bot.send_message(chat_id=user, text=text)
     logging.info("Shutting down...")
 
 

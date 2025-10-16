@@ -1,0 +1,7 @@
+version: "4"
+services:
+  bot:
+    container_name: fx-replay-bot
+    image: fxreplay-import
+    env_file:
+      - .env

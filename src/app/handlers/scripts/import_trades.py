@@ -667,7 +667,7 @@ def _normalize_pair_name(raw: str) -> str:
         "NAS100": "US100", "US100": "US100", "NDX100": "US100",
         "DJ30": "US30", "US30": "US30", "DJI": "US30",
         "FTSE100": "UK100", "UK100": "UK100",
-        "DE40": "GER40", "DAX": "GER40", "GER40": "GER40",
+        "DE40": "GER40", "DAX": "GER40", "GER40": "GER40", "DEUIDXEUR": "GER40",
         "DAX30": "GER30", "DE30": "GER30", "GER30": "GER30",
         "NIKKEI225": "JP225", "NI225": "JP225", "JP225": "JP225",
 
